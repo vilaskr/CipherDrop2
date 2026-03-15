@@ -22,6 +22,10 @@ import {
   Image as ImageIcon,
   Music,
   Reply,
+  Mic,
+  Square,
+  Trash2,
+  ChevronDown,
 } from 'lucide-react';
 import { encryptData, decryptData, generateSecureKey } from '../lib/crypto';
 import { cn } from '../lib/utils';
@@ -85,6 +89,9 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
   const [pinnedMessageId, setPinnedMessageId] = useState<string | null>(null);
   const [fileAttachment, setFileAttachment] = useState<File | null>(null);
   const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
+  const [activeMessageId, setActiveMessageId] = useState<string | null>(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingTime, setRecordingTime] = useState(0);
 
   const [participantId] = useState(() =>
     Math.random().toString(36).substring(2, 15)
@@ -99,6 +106,9 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
   const handleOfflineRef = useRef<() => void>();
   const typingTimeoutRef = useRef<NodeJS.Timeout>();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const recordingIntervalRef = useRef<NodeJS.Timeout>();
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -531,6 +541,55 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
     setError('');
   };
 
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) {
+          audioChunksRef.current.push(e.data);
+        }
+      };
+
+      mediaRecorder.onstop = () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        const file = new File([audioBlob], `Voice Message.webm`, { type: 'audio/webm' });
+        setFileAttachment(file);
+        stream.getTracks().forEach(track => track.stop());
+      };
+
+      mediaRecorder.start();
+      setIsRecording(true);
+      setRecordingTime(0);
+      recordingIntervalRef.current = setInterval(() => {
+        setRecordingTime(prev => prev + 1);
+      }, 1000);
+    } catch (err) {
+      console.error('Failed to start recording', err);
+      setError('Microphone access denied or unavailable.');
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+      if (recordingIntervalRef.current) clearInterval(recordingIntervalRef.current);
+    }
+  };
+
+  const cancelRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+      if (recordingIntervalRef.current) clearInterval(recordingIntervalRef.current);
+      setFileAttachment(null);
+    }
+  };
+
   const handleLeaveRoom = async () => {
     if (unsubscribeMessagesRef.current) unsubscribeMessagesRef.current();
     if (unsubscribeParticipantsRef.current)
@@ -835,7 +894,7 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
 
               <div
                 className={cn(
-                  'flex-1 overflow-y-auto mb-4 space-y-4 p-2 max-h-[500px]',
+                  'flex-1 overflow-y-auto mb-4 space-y-4 p-2 pb-16 max-h-[500px]',
                   pinnedMessage ? 'pt-20' : ''
                 )}
               >
@@ -875,11 +934,12 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
                         </div>
                         <div
                           className={cn(
-                            'px-4 py-2 rounded-2xl relative group',
+                            'px-4 py-2 rounded-2xl relative group cursor-pointer sm:cursor-default',
                             msg.isSelf
                               ? 'bg-indigo-600 text-white rounded-br-sm'
                               : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 rounded-bl-sm'
                           )}
+                          onClick={() => setActiveMessageId(activeMessageId === msg.id ? null : msg.id)}
                         >
                           {msg.replyTo && (
                             <div className="mb-2 p-2 rounded bg-black/10 dark:bg-white/10 border-l-2 border-indigo-400 text-xs">
@@ -895,9 +955,10 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
                                   ? 'bg-indigo-700/50'
                                   : 'bg-zinc-200 dark:bg-zinc-700'
                               )}
-                              onClick={() =>
-                                downloadAttachment(msg.fileAttachment!, msg.messageKey || roomCode)
-                              }
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                downloadAttachment(msg.fileAttachment!, msg.messageKey || roomCode);
+                              }}
                             >
                               {msg.fileAttachment.type.startsWith('image/') ? (
                                 <ImageIcon className="w-5 h-5" />
@@ -964,41 +1025,47 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
                             )}
                           </div>
 
-                          <div className="absolute -bottom-8 right-0 opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 bg-white dark:bg-zinc-800 shadow-sm border border-zinc-200 dark:border-zinc-700 rounded-lg px-2 py-1 z-10">
+                          <div className={cn(
+                            "absolute top-full mt-1 flex flex-wrap sm:flex-nowrap items-center gap-1 bg-white dark:bg-zinc-800 shadow-lg border border-zinc-200 dark:border-zinc-700 rounded-lg px-2 py-1.5 z-50 transition-all w-max max-w-[85vw] sm:max-w-none",
+                            msg.isSelf ? "right-0 origin-top-right" : "left-0 origin-top-left",
+                            activeMessageId === msg.id 
+                              ? "opacity-100 scale-100 pointer-events-auto" 
+                              : "opacity-0 scale-95 pointer-events-none sm:group-hover:opacity-100 sm:group-hover:scale-100 sm:group-hover:pointer-events-auto"
+                          )}>
                             {['👍', '❤️', '😂', '😮', '😢'].map(emoji => (
                               <button
                                 key={emoji}
-                                onClick={() => handleReact(msg.id, emoji)}
-                                className="hover:scale-125 transition-transform px-1 text-sm"
+                                onClick={(e) => { e.stopPropagation(); handleReact(msg.id, emoji); }}
+                                className="hover:scale-125 transition-transform px-1.5 text-base"
                               >
                                 {emoji}
                               </button>
                             ))}
-                            <div className="w-px h-4 bg-zinc-200 dark:bg-zinc-700 mx-1" />
+                            <div className="w-px h-5 bg-zinc-200 dark:bg-zinc-700 mx-1" />
                             <button
-                              onClick={() => setReplyingTo(msg)}
-                              className="text-zinc-500 hover:text-indigo-500 p-1"
+                              onClick={(e) => { e.stopPropagation(); setReplyingTo(msg); setActiveMessageId(null); }}
+                              className="text-zinc-500 hover:text-indigo-500 p-1.5"
                               title="Reply"
                             >
-                              <Reply className="w-3.5 h-3.5" />
+                              <Reply className="w-4 h-4" />
                             </button>
                             {msg.isSelf && (
                               <button
-                                onClick={() => handleEditMessage(msg)}
-                                className="text-zinc-500 hover:text-indigo-500 p-1"
+                                onClick={(e) => { e.stopPropagation(); handleEditMessage(msg); setActiveMessageId(null); }}
+                                className="text-zinc-500 hover:text-indigo-500 p-1.5"
                                 title="Edit"
                               >
-                                <Edit2 className="w-3.5 h-3.5" />
+                                <Edit2 className="w-4 h-4" />
                               </button>
                             )}
                             <button
-                              onClick={() => handlePinMessage(msg.id)}
-                              className="text-zinc-500 hover:text-indigo-500 p-1"
+                              onClick={(e) => { e.stopPropagation(); handlePinMessage(msg.id); setActiveMessageId(null); }}
+                              className="text-zinc-500 hover:text-indigo-500 p-1.5"
                               title="Pin"
                             >
-                              <Pin className="w-3.5 h-3.5" />
+                              <Pin className="w-4 h-4" />
                             </button>
-                            <span className="text-[8px] text-zinc-500 whitespace-nowrap ml-1">
+                            <span className="text-[9px] text-zinc-400 whitespace-nowrap ml-1 pr-1">
                               Expires in{' '}
                               {Math.max(
                                 0,
@@ -1022,9 +1089,13 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
                 </div>
               )}
 
-              {fileAttachment && (
+              {fileAttachment && !isRecording && (
                 <div className="absolute bottom-[72px] left-4 bg-zinc-100 dark:bg-zinc-800 px-3 py-1.5 rounded-lg text-xs flex items-center gap-2 shadow-sm border border-zinc-200 dark:border-zinc-700">
-                  <Paperclip className="w-3 h-3 text-zinc-500" />
+                  {fileAttachment.type.startsWith('audio/') ? (
+                    <Music className="w-3 h-3 text-zinc-500" />
+                  ) : (
+                    <Paperclip className="w-3 h-3 text-zinc-500" />
+                  )}
                   <span className="truncate max-w-[150px] font-medium">
                     {fileAttachment.name}
                   </span>
@@ -1050,42 +1121,79 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
                   </div>
                 )}
                 <div className="flex gap-2">
-                  <input
-                    type="file"
-                    ref={fileInputRef}
-                    onChange={handleFileSelect}
-                    className="hidden"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    className="p-3 rounded-xl bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 text-zinc-500 hover:text-indigo-500 transition-colors"
-                    title="Attach File (< 500KB)"
-                  >
-                    <Paperclip className="w-5 h-5" />
-                  </button>
-                  <input
-                    type="text"
-                    value={newMessage}
-                    onChange={handleTyping}
-                    placeholder={
-                      editingMessageId
-                        ? 'Edit message...'
-                        : 'Type an encrypted message...'
-                    }
-                    className="flex-1 px-4 py-3 rounded-xl bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
-                  />
-                  {editingMessageId && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setEditingMessageId(null);
-                        setNewMessage('');
-                      }}
-                      className="p-3 text-zinc-400 hover:text-red-500"
-                    >
-                      <X className="w-5 h-5" />
-                    </button>
+                  {isRecording ? (
+                    <div className="flex-1 flex items-center justify-between px-4 py-2 rounded-xl bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800/30">
+                      <div className="flex items-center gap-3">
+                        <div className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse" />
+                        <span className="text-red-600 dark:text-red-400 font-mono text-sm">
+                          {Math.floor(recordingTime / 60)}:{(recordingTime % 60).toString().padStart(2, '0')}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={cancelRecording}
+                          className="p-2 text-zinc-500 hover:text-red-500 transition-colors"
+                        >
+                          <Trash2 className="w-5 h-5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={stopRecording}
+                          className="p-2 text-red-600 hover:text-red-700 transition-colors"
+                        >
+                          <Square className="w-5 h-5 fill-current" />
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <input
+                        type="file"
+                        ref={fileInputRef}
+                        onChange={handleFileSelect}
+                        className="hidden"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        className="p-3 rounded-xl bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 text-zinc-500 hover:text-indigo-500 transition-colors shrink-0"
+                        title="Attach File (< 500KB)"
+                      >
+                        <Paperclip className="w-5 h-5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={startRecording}
+                        className="p-3 rounded-xl bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 text-zinc-500 hover:text-red-500 transition-colors shrink-0"
+                        title="Record Voice Message"
+                      >
+                        <Mic className="w-5 h-5" />
+                      </button>
+                      <input
+                        type="text"
+                        value={newMessage}
+                        onChange={handleTyping}
+                        placeholder={
+                          editingMessageId
+                            ? 'Edit message...'
+                            : 'Type an encrypted message...'
+                        }
+                        className="flex-1 min-w-0 px-4 py-3 rounded-xl bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                      />
+                      {editingMessageId && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingMessageId(null);
+                            setNewMessage('');
+                          }}
+                          className="p-3 text-zinc-400 hover:text-red-500 shrink-0"
+                        >
+                          <X className="w-5 h-5" />
+                        </button>
+                      )}
+                    </>
                   )}
                   <button
                     type="submit"
@@ -1093,9 +1201,10 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
                       (!newMessage.trim() && !fileAttachment) ||
                       isSending ||
                       isReconnecting ||
-                      !navigator.onLine
+                      !navigator.onLine ||
+                      isRecording
                     }
-                    className="px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                    className="px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 shrink-0"
                   >
                     {isSending ? (
                       <RefreshCw className="w-5 h-5 animate-spin" />
