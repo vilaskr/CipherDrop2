@@ -3,7 +3,8 @@ import { motion, AnimatePresence } from 'motion/react';
 import { ArrowLeft, MessageSquare, Key, RefreshCw, Send, LogOut, Trash2, Clock, Users, User } from 'lucide-react';
 import { encryptData, decryptData, generateSecureKey } from '../lib/crypto';
 import { cn } from '../lib/utils';
-import { io, Socket } from 'socket.io-client';
+import { db } from '../firebase';
+import { collection, addDoc, query, orderBy, onSnapshot, deleteDoc, doc, setDoc } from 'firebase/firestore';
 
 interface ChatMessage {
   id: string;
@@ -12,10 +13,6 @@ interface ChatMessage {
   timestamp: number;
   expiresAt: number;
   isSelf: boolean;
-}
-
-interface EncryptedPacket {
-  ciphertext: string; // The base64 encrypted blob
 }
 
 export default function SecretChatPage({ onBack }: { onBack: () => void }) {
@@ -29,8 +26,12 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
   const [isSending, setIsSending] = useState(false);
   const [participants, setParticipants] = useState<string[]>([]);
   
-  const socketRef = useRef<Socket | null>(null);
+  const [participantId] = useState(() => Math.random().toString(36).substring(2, 15));
+  
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const unsubscribeMessagesRef = useRef<() => void>();
+  const unsubscribeParticipantsRef = useRef<() => void>();
+  const heartbeatIntervalRef = useRef<NodeJS.Timeout>();
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -43,14 +44,13 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
   useEffect(() => {
     // Cleanup on unmount
     return () => {
-      if (socketRef.current) {
-        socketRef.current.disconnect();
-      }
+      handleLeaveRoom();
     };
   }, []);
 
   // Handle disappearing messages
   useEffect(() => {
+    if (step !== 'chat') return;
     const interval = setInterval(() => {
       const now = Date.now();
       setMessages(prev => {
@@ -60,13 +60,13 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
       });
     }, 1000);
     return () => clearInterval(interval);
-  }, []);
+  }, [step]);
 
   const handleGenerateRoom = () => {
     setRoomCode(generateSecureKey().substring(0, 12));
   };
 
-  const handleJoinChat = () => {
+  const handleJoinChat = async () => {
     if (!roomCode.trim()) {
       setError('Please enter a room code');
       return;
@@ -82,93 +82,125 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
 
     setError('');
     
-    // Connect to WebSocket server
-    const socket = io();
-    socketRef.current = socket;
-
-    socket.on('connect', () => {
-      socket.emit('join-room', { 
-        roomId: roomCode, 
+    try {
+      // Register participant
+      const participantRef = doc(db, 'chatRooms', roomCode, 'participants', participantId);
+      await setDoc(participantRef, {
         name: userName,
-        settings: { expiryMinutes }
+        lastActive: Date.now()
       });
-      setStep('chat');
-    });
 
-    socket.on('user-list', (users: string[]) => {
-      setParticipants(users);
-    });
-
-    socket.on('chat-history', async (history: EncryptedPacket[]) => {
-      const decryptedMessages: ChatMessage[] = [];
-      for (const packet of history) {
+      // Start heartbeat
+      heartbeatIntervalRef.current = setInterval(async () => {
         try {
-          const decrypted = await decryptData(packet.ciphertext, roomCode);
-          const data = JSON.parse(new TextDecoder().decode(decrypted.data));
-          if (data.expiresAt > Date.now()) {
-            decryptedMessages.push({
-              ...data,
-              isSelf: data.sender === userName
-            });
-          }
-        } catch (err) {
-          console.error('Failed to decrypt history message', err);
+          await setDoc(participantRef, {
+            name: userName,
+            lastActive: Date.now()
+          }, { merge: true });
+        } catch (e) {
+          console.error('Heartbeat failed', e);
         }
-      }
-      setMessages(decryptedMessages);
-    });
+      }, 15000);
 
-    socket.on('new-message', async (packet: EncryptedPacket & { id: string, timestamp: number }) => {
-      try {
-        const decrypted = await decryptData(packet.ciphertext, roomCode);
-        const data = JSON.parse(new TextDecoder().decode(decrypted.data));
-        
-        setMessages(prev => [
-          ...prev,
-          {
-            ...data,
-            id: packet.id,
-            timestamp: packet.timestamp,
-            isSelf: data.sender === userName
+      // Listen for participants
+      const participantsQuery = query(collection(db, 'chatRooms', roomCode, 'participants'));
+      unsubscribeParticipantsRef.current = onSnapshot(participantsQuery, (snapshot) => {
+        const now = Date.now();
+        const activeUsers: string[] = [];
+        snapshot.forEach(doc => {
+          const data = doc.data();
+          // Consider inactive if no heartbeat for 45 seconds
+          if (now - data.lastActive < 45000) {
+            activeUsers.push(data.name);
           }
-        ]);
-      } catch (err) {
-        console.error('Failed to decrypt new message', err);
-      }
-    });
+        });
+        setParticipants(Array.from(new Set(activeUsers)));
+      }, (err) => {
+        console.error('Participants listener error:', err);
+      });
 
-    socket.on('chat-cleared', () => {
-      setMessages([]);
-    });
+      // Listen for messages
+      const messagesQuery = query(
+        collection(db, 'chatRooms', roomCode, 'messages'),
+        orderBy('timestamp', 'asc')
+      );
+      
+      unsubscribeMessagesRef.current = onSnapshot(messagesQuery, async (snapshot) => {
+        const newMessages: ChatMessage[] = [];
+        const now = Date.now();
+        
+        for (const change of snapshot.docChanges()) {
+          if (change.type === 'added') {
+            const data = change.doc.data();
+            if (data.expiresAt > now) {
+              try {
+                const decrypted = await decryptData(data.ciphertext, roomCode);
+                const msgData = JSON.parse(new TextDecoder().decode(decrypted.data));
+                
+                newMessages.push({
+                  ...msgData,
+                  id: change.doc.id,
+                  timestamp: data.timestamp,
+                  expiresAt: data.expiresAt,
+                  isSelf: msgData.sender === userName
+                });
+              } catch (err) {
+                console.error('Failed to decrypt message', err);
+              }
+            } else {
+              // Optionally clean up expired messages from Firestore
+              try {
+                deleteDoc(change.doc.ref);
+              } catch (e) {}
+            }
+          }
+        }
+        
+        if (newMessages.length > 0) {
+          setMessages(prev => {
+            const combined = [...prev, ...newMessages];
+            const unique = Array.from(new Map(combined.map(item => [item.id, item])).values());
+            return unique.sort((a, b) => a.timestamp - b.timestamp);
+          });
+        }
+      }, (err) => {
+        console.error('Messages listener error:', err);
+        setError('Unable to join room. Please check the room ID or connection.');
+        handleLeaveRoom();
+      });
 
-    socket.on('disconnect', () => {
-      setStep('setup');
-      setMessages([]);
-    });
+      setStep('chat');
+    } catch (err) {
+      console.error('Failed to join room', err);
+      setError('Unable to join room. Please check the room ID or connection.');
+    }
   };
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newMessage.trim() || !socketRef.current) return;
+    if (!newMessage.trim()) return;
 
     setIsSending(true);
     const messageText = newMessage;
     setNewMessage('');
 
     try {
+      const timestamp = Date.now();
+      const expiresAt = timestamp + expiryMinutes * 60 * 1000;
+      
       const messageData = {
         sender: userName,
-        text: messageText,
-        timestamp: Date.now(),
-        expiresAt: Date.now() + expiryMinutes * 60 * 1000
+        text: messageText
       };
 
       const dataToEncrypt = new TextEncoder().encode(JSON.stringify(messageData));
       const ciphertext = await encryptData(dataToEncrypt, roomCode, 'text');
 
-      socketRef.current.emit('send-message', {
-        roomId: roomCode,
-        encryptedMessage: { ciphertext }
+      await addDoc(collection(db, 'chatRooms', roomCode, 'messages'), {
+        ciphertext,
+        sender: userName,
+        timestamp,
+        expiresAt
       });
     } catch (err) {
       console.error('Failed to send message', err);
@@ -179,11 +211,19 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
     }
   };
 
-  const handleLeaveRoom = () => {
-    if (socketRef.current) {
-      socketRef.current.disconnect();
-      socketRef.current = null;
+  const handleLeaveRoom = async () => {
+    if (unsubscribeMessagesRef.current) unsubscribeMessagesRef.current();
+    if (unsubscribeParticipantsRef.current) unsubscribeParticipantsRef.current();
+    if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
+    
+    if (step === 'chat' && roomCode && participantId) {
+      try {
+        await deleteDoc(doc(db, 'chatRooms', roomCode, 'participants', participantId));
+      } catch (e) {
+        console.error('Failed to remove participant', e);
+      }
     }
+    
     setStep('setup');
     setMessages([]);
     setParticipants([]);

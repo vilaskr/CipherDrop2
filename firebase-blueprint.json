@@ -20,6 +20,46 @@
         }
       },
       "required": ["encryptedData", "authorUID", "createdAt"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "An encrypted chat message.",
+      "type": "object",
+      "properties": {
+        "ciphertext": {
+          "type": "string",
+          "description": "The base64 encoded encrypted message payload."
+        },
+        "sender": {
+          "type": "string",
+          "description": "The name of the user who sent the message."
+        },
+        "timestamp": {
+          "type": "number",
+          "description": "The time the message was sent."
+        },
+        "expiresAt": {
+          "type": "number",
+          "description": "The time the message expires."
+        }
+      },
+      "required": ["ciphertext", "sender", "timestamp", "expiresAt"]
+    },
+    "ChatParticipant": {
+      "title": "ChatParticipant",
+      "description": "A participant in a chat room.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The display name of the participant."
+        },
+        "lastActive": {
+          "type": "number",
+          "description": "The last active timestamp of the participant."
+        }
+      },
+      "required": ["name", "lastActive"]
     }
   },
   "firestore": {
@@ -28,6 +68,18 @@
         "$ref": "#/entities/Payload"
       },
       "description": "Stores encrypted payloads for sharing."
+    },
+    "/chatRooms/{roomId}/messages/{messageId}": {
+      "schema": {
+        "$ref": "#/entities/ChatMessage"
+      },
+      "description": "Stores encrypted chat messages for a specific room."
+    },
+    "/chatRooms/{roomId}/participants/{participantId}": {
+      "schema": {
+        "$ref": "#/entities/ChatParticipant"
+      },
+      "description": "Stores active participants in a chat room."
     }
   }
 }
