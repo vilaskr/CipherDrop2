@@ -57,23 +57,22 @@ service cloud.firestore {
     }
 
     function isValidChatMessage() {
-      return hasOnlyAllowedFields(['ciphertext', 'sender', 'timestamp', 'expiresAt']) &&
-             request.resource.data.ciphertext is string &&
+      return request.resource.data.ciphertext is string &&
              request.resource.data.ciphertext.size() > 0 &&
              request.resource.data.ciphertext.size() <= 1048576 && // Max 1MB
-             request.resource.data.sender is string &&
-             request.resource.data.sender.size() > 0 &&
-             request.resource.data.sender.size() <= 128 &&
-             request.resource.data.timestamp is number &&
-             request.resource.data.expiresAt is timestamp;
+             (!('encryptedKey' in request.resource.data) || request.resource.data.encryptedKey is string) &&
+             (!('isEdited' in request.resource.data) || request.resource.data.isEdited is bool) &&
+             (!('readBy' in request.resource.data) || request.resource.data.readBy is list) &&
+             (!('reactions' in request.resource.data) || request.resource.data.reactions is map) &&
+             (!('sender' in request.resource.data) || (request.resource.data.sender is string && request.resource.data.sender.size() <= 128)) &&
+             (!('timestamp' in request.resource.data) || request.resource.data.timestamp is number) &&
+             (!('expiresAt' in request.resource.data) || request.resource.data.expiresAt is timestamp);
     }
 
     function isValidChatParticipant() {
-      return hasOnlyAllowedFields(['name', 'lastActive']) &&
-             request.resource.data.name is string &&
-             request.resource.data.name.size() > 0 &&
-             request.resource.data.name.size() <= 128 &&
-             request.resource.data.lastActive is number;
+      return (!('name' in request.resource.data) || (request.resource.data.name is string && request.resource.data.name.size() <= 128)) &&
+             (!('lastActive' in request.resource.data) || request.resource.data.lastActive is number) &&
+             (!('isTyping' in request.resource.data) || request.resource.data.isTyping is bool);
     }
 
     match /payloads/{payloadId} {
@@ -92,10 +91,14 @@ service cloud.firestore {
       allow delete: if isAuthenticated() && resource.data.authorUID == request.auth.uid;
     }
 
+    match /chatRooms/{roomId}/metadata/{docId} {
+      allow read, write: if true;
+    }
+
     match /chatRooms/{roomId}/messages/{messageId} {
       allow read: if true;
       allow create: if isValidChatMessage();
-      allow update: if false;
+      allow update: if isValidChatMessage();
       allow delete: if true;
     }
 
