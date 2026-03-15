@@ -93,16 +93,16 @@ service cloud.firestore {
     }
 
     match /chatRooms/{roomId}/messages/{messageId} {
-      allow read: if isAuthenticated();
-      allow create: if isAuthenticated() && isValidChatMessage();
+      allow read: if true;
+      allow create: if isValidChatMessage();
       allow update: if false;
-      allow delete: if isAuthenticated();
+      allow delete: if true;
     }
 
     match /chatRooms/{roomId}/participants/{participantId} {
-      allow read: if isAuthenticated();
-      allow create, update: if isAuthenticated() && isValidChatParticipant();
-      allow delete: if isAuthenticated();
+      allow read: if true;
+      allow create, update: if isValidChatParticipant();
+      allow delete: if true;
     }
   }
 }
