@@ -4,7 +4,8 @@ import { ArrowLeft, MessageSquare, Key, RefreshCw, Send, LogOut, Trash2, Clock, 
 import { encryptData, decryptData, generateSecureKey } from '../lib/crypto';
 import { cn } from '../lib/utils';
 import { db } from '../firebase';
-import { collection, addDoc, query, orderBy, onSnapshot, deleteDoc, doc, setDoc } from 'firebase/firestore';
+import { collection, addDoc, query, orderBy, onSnapshot, deleteDoc, doc, setDoc, Timestamp } from 'firebase/firestore';
+import { useAuth } from '../lib/useAuth';
 
 interface ChatMessage {
   id: string;
@@ -16,6 +17,7 @@ interface ChatMessage {
 }
 
 export default function SecretChatPage({ onBack }: { onBack: () => void }) {
+  const { user, signIn } = useAuth();
   const [step, setStep] = useState<'setup' | 'chat'>('setup');
   const [roomCode, setRoomCode] = useState('');
   const [userName, setUserName] = useState('');
@@ -67,6 +69,15 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
   };
 
   const handleJoinChat = async () => {
+    if (!user) {
+      try {
+        await signIn();
+      } catch (e) {
+        setError('You must sign in to join a chat room.');
+        return;
+      }
+    }
+
     if (!roomCode.trim()) {
       setError('Please enter a room code');
       return;
@@ -132,7 +143,8 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
         for (const change of snapshot.docChanges()) {
           if (change.type === 'added') {
             const data = change.doc.data();
-            if (data.expiresAt > now) {
+            const expiresAtMs = data.expiresAt instanceof Timestamp ? data.expiresAt.toMillis() : data.expiresAt;
+            if (expiresAtMs > now) {
               try {
                 const decrypted = await decryptData(data.ciphertext, roomCode);
                 const msgData = JSON.parse(new TextDecoder().decode(decrypted.data));
@@ -141,7 +153,7 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
                   ...msgData,
                   id: change.doc.id,
                   timestamp: data.timestamp,
-                  expiresAt: data.expiresAt,
+                  expiresAt: expiresAtMs,
                   isSelf: msgData.sender === userName
                 });
               } catch (err) {
@@ -186,7 +198,8 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
 
     try {
       const timestamp = Date.now();
-      const expiresAt = timestamp + expiryMinutes * 60 * 1000;
+      const expiresAtMs = timestamp + expiryMinutes * 60 * 1000;
+      const expiresAt = Timestamp.fromMillis(expiresAtMs);
       
       const messageData = {
         sender: userName,

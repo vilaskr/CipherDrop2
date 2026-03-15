@@ -65,7 +65,7 @@ service cloud.firestore {
              request.resource.data.sender.size() > 0 &&
              request.resource.data.sender.size() <= 128 &&
              request.resource.data.timestamp is number &&
-             request.resource.data.expiresAt is number;
+             request.resource.data.expiresAt is timestamp;
     }
 
     function isValidChatParticipant() {
@@ -93,16 +93,16 @@ service cloud.firestore {
     }
 
     match /chatRooms/{roomId}/messages/{messageId} {
-      allow read: if true;
-      allow create: if isValidChatMessage();
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidChatMessage();
       allow update: if false;
-      allow delete: if true;
+      allow delete: if isAuthenticated();
     }
 
     match /chatRooms/{roomId}/participants/{participantId} {
-      allow read: if true;
-      allow create, update: if isValidChatParticipant();
-      allow delete: if true;
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() && isValidChatParticipant();
+      allow delete: if isAuthenticated();
     }
   }
 }
