@@ -75,26 +75,31 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
       return;
     }
 
-    if (!roomCode.trim()) {
+    const trimmedRoomCode = roomCode.trim();
+    const trimmedUserName = userName.trim();
+
+    if (!trimmedRoomCode) {
       setError('Please enter a room code');
       return;
     }
-    if (!userName.trim()) {
+    if (!trimmedUserName) {
       setError('Please enter your name');
       return;
     }
-    if (roomCode.length < 8) {
+    if (trimmedRoomCode.length < 8) {
       setError('Room code must be at least 8 characters long');
       return;
     }
 
+    setRoomCode(trimmedRoomCode);
+    setUserName(trimmedUserName);
     setError('');
     
     try {
       // Register participant
-      const participantRef = doc(db, 'chatRooms', roomCode, 'participants', participantId);
+      const participantRef = doc(db, 'chatRooms', trimmedRoomCode, 'participants', participantId);
       await setDoc(participantRef, {
-        name: userName,
+        name: trimmedUserName,
         lastActive: Date.now()
       });
 
@@ -103,7 +108,7 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
         if (!navigator.onLine) return;
         try {
           await setDoc(participantRef, {
-            name: userName,
+            name: trimmedUserName,
             lastActive: Date.now()
           }, { merge: true });
         } catch (e) {
@@ -114,7 +119,7 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
       const handleOnline = () => {
         setIsReconnecting(false);
         setDoc(participantRef, {
-          name: userName,
+          name: trimmedUserName,
           lastActive: Date.now()
         }, { merge: true }).catch(console.error);
       };
@@ -129,7 +134,7 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
       handleOfflineRef.current = handleOffline;
 
       // Listen for participants
-      const participantsQuery = query(collection(db, 'chatRooms', roomCode, 'participants'));
+      const participantsQuery = query(collection(db, 'chatRooms', trimmedRoomCode, 'participants'));
       unsubscribeParticipantsRef.current = onSnapshot(participantsQuery, (snapshot) => {
         const now = Date.now();
         const activeUsers: string[] = [];
@@ -147,7 +152,7 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
 
       // Listen for messages
       const messagesQuery = query(
-        collection(db, 'chatRooms', roomCode, 'messages'),
+        collection(db, 'chatRooms', trimmedRoomCode, 'messages'),
         orderBy('timestamp', 'asc')
       );
       
@@ -158,10 +163,18 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
         for (const change of snapshot.docChanges()) {
           if (change.type === 'added') {
             const data = change.doc.data();
-            const expiresAtMs = data.expiresAt instanceof Timestamp ? data.expiresAt.toMillis() : data.expiresAt;
+            let expiresAtMs = 0;
+            if (data.expiresAt?.toMillis) {
+              expiresAtMs = data.expiresAt.toMillis();
+            } else if (data.expiresAt?.seconds) {
+              expiresAtMs = data.expiresAt.seconds * 1000;
+            } else if (typeof data.expiresAt === 'number') {
+              expiresAtMs = data.expiresAt;
+            }
+
             if (expiresAtMs > now) {
               try {
-                const decrypted = await decryptData(data.ciphertext, roomCode);
+                const decrypted = await decryptData(data.ciphertext, trimmedRoomCode);
                 const msgData = JSON.parse(new TextDecoder().decode(decrypted.data));
                 
                 newMessages.push({
@@ -169,7 +182,7 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
                   id: change.doc.id,
                   timestamp: data.timestamp,
                   expiresAt: expiresAtMs,
-                  isSelf: msgData.sender === userName
+                  isSelf: msgData.sender === trimmedUserName
                 });
               } catch (err) {
                 console.error('Failed to decrypt message', err);
@@ -436,8 +449,10 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
                         msg.isSelf ? "ml-auto items-end" : "mr-auto items-start"
                       )}
                     >
-                      <div className="flex items-center gap-2 mb-1 px-1">
-                        {!msg.isSelf && <span className="text-xs font-bold text-zinc-700 dark:text-zinc-300">{msg.sender}</span>}
+                      <div className={cn("flex items-center gap-2 mb-1 px-1", msg.isSelf ? "flex-row-reverse" : "flex-row")}>
+                        <span className="text-xs font-bold text-zinc-700 dark:text-zinc-300">
+                          {msg.isSelf ? 'You' : msg.sender}
+                        </span>
                         <span className="text-[10px] text-zinc-400">
                           {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                         </span>
