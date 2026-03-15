@@ -39,8 +39,7 @@
           "description": "The time the message was sent."
         },
         "expiresAt": {
-          "type": "string",
-          "format": "date-time",
+          "type": "number",
           "description": "The time the message expires."
         }
       },
