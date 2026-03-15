@@ -4,7 +4,7 @@ import { ArrowLeft, MessageSquare, Key, RefreshCw, Send, LogOut, Trash2, Clock, 
 import { encryptData, decryptData, generateSecureKey } from '../lib/crypto';
 import { cn } from '../lib/utils';
 import { db } from '../firebase';
-import { collection, addDoc, query, orderBy, onSnapshot, deleteDoc, doc, setDoc } from 'firebase/firestore';
+import { collection, addDoc, query, orderBy, onSnapshot, deleteDoc, doc, setDoc, Timestamp } from 'firebase/firestore';
 
 interface ChatMessage {
   id: string;
@@ -25,6 +25,7 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
   const [error, setError] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [participants, setParticipants] = useState<string[]>([]);
+  const [isReconnecting, setIsReconnecting] = useState(false);
   
   const [participantId] = useState(() => Math.random().toString(36).substring(2, 15));
   
@@ -32,6 +33,8 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
   const unsubscribeMessagesRef = useRef<() => void>();
   const unsubscribeParticipantsRef = useRef<() => void>();
   const heartbeatIntervalRef = useRef<NodeJS.Timeout>();
+  const handleOnlineRef = useRef<() => void>();
+  const handleOfflineRef = useRef<() => void>();
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -67,6 +70,11 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
   };
 
   const handleJoinChat = async () => {
+    if (!navigator.onLine) {
+      setError('You are currently offline. Please check your connection.');
+      return;
+    }
+
     if (!roomCode.trim()) {
       setError('Please enter a room code');
       return;
@@ -92,6 +100,7 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
 
       // Start heartbeat
       heartbeatIntervalRef.current = setInterval(async () => {
+        if (!navigator.onLine) return;
         try {
           await setDoc(participantRef, {
             name: userName,
@@ -101,6 +110,23 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
           console.error('Heartbeat failed', e);
         }
       }, 15000);
+
+      const handleOnline = () => {
+        setIsReconnecting(false);
+        setDoc(participantRef, {
+          name: userName,
+          lastActive: Date.now()
+        }, { merge: true }).catch(console.error);
+      };
+
+      const handleOffline = () => {
+        setIsReconnecting(true);
+      };
+
+      window.addEventListener('online', handleOnline);
+      window.addEventListener('offline', handleOffline);
+      handleOnlineRef.current = handleOnline;
+      handleOfflineRef.current = handleOffline;
 
       // Listen for participants
       const participantsQuery = query(collection(db, 'chatRooms', roomCode, 'participants'));
@@ -132,7 +158,8 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
         for (const change of snapshot.docChanges()) {
           if (change.type === 'added') {
             const data = change.doc.data();
-            if (data.expiresAt > now) {
+            const expiresAtMs = data.expiresAt instanceof Timestamp ? data.expiresAt.toMillis() : data.expiresAt;
+            if (expiresAtMs > now) {
               try {
                 const decrypted = await decryptData(data.ciphertext, roomCode);
                 const msgData = JSON.parse(new TextDecoder().decode(decrypted.data));
@@ -141,7 +168,7 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
                   ...msgData,
                   id: change.doc.id,
                   timestamp: data.timestamp,
-                  expiresAt: data.expiresAt,
+                  expiresAt: expiresAtMs,
                   isSelf: msgData.sender === userName
                 });
               } catch (err) {
@@ -178,7 +205,7 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newMessage.trim()) return;
+    if (!newMessage.trim() || isReconnecting || !navigator.onLine) return;
 
     setIsSending(true);
     const messageText = newMessage;
@@ -186,7 +213,8 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
 
     try {
       const timestamp = Date.now();
-      const expiresAt = timestamp + expiryMinutes * 60 * 1000;
+      const expiresAtMs = timestamp + expiryMinutes * 60 * 1000;
+      const expiresAt = Timestamp.fromMillis(expiresAtMs);
       
       const messageData = {
         sender: userName,
@@ -215,6 +243,9 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
     if (unsubscribeMessagesRef.current) unsubscribeMessagesRef.current();
     if (unsubscribeParticipantsRef.current) unsubscribeParticipantsRef.current();
     if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
+    if (handleOnlineRef.current) window.removeEventListener('online', handleOnlineRef.current);
+    if (handleOfflineRef.current) window.removeEventListener('offline', handleOfflineRef.current);
+    setIsReconnecting(false);
     
     if (step === 'chat' && roomCode && participantId) {
       try {
@@ -348,8 +379,16 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
-            className="flex-1 flex flex-col md:flex-row gap-6 h-full"
+            className="flex-1 flex flex-col md:flex-row gap-6 h-full relative"
           >
+            {isReconnecting && (
+              <div className="absolute top-0 left-0 right-0 z-10 flex justify-center">
+                <div className="bg-amber-500 text-white text-xs font-medium px-3 py-1.5 rounded-b-lg shadow-sm flex items-center gap-2">
+                  <RefreshCw className="w-3 h-3 animate-spin" />
+                  Connection lost. Reconnecting...
+                </div>
+              </div>
+            )}
             {/* Sidebar: Participants */}
             <div className="w-full md:w-48 flex flex-col gap-4">
               <div className="p-4 bg-zinc-50 dark:bg-zinc-950 rounded-2xl border border-zinc-200 dark:border-zinc-800">
@@ -435,7 +474,7 @@ export default function SecretChatPage({ onBack }: { onBack: () => void }) {
                 />
                 <button
                   type="submit"
-                  disabled={!newMessage.trim() || isSending}
+                  disabled={!newMessage.trim() || isSending || isReconnecting || !navigator.onLine}
                   className="px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                 >
                   {isSending ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
